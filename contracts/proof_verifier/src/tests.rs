@@ -762,3 +762,21 @@ fn test_verify_rejected_format_returns_false_without_panicking() {
     let is_valid = client.verify_payment_proof(&proof, &malformed_format_inputs);
     assert!(!is_valid);
 }
+
+#[test]
+fn test_verify_with_reference_enforces_input_count_boundary() {
+    // Reference-gated verification uses the same positional input contract
+    // as `verify_payment_proof`: a valid reference must not turn a public
+    // input count mismatch into an acceptance.
+    let env = Env::default();
+    let (client, admin) = setup_initialized_contract(&env);
+
+    let ref_id = BytesN::from_array(&env, &[21u8; 32]);
+    let proof = mock_snarkjs_proof(&env);
+    client.register_proof_reference(&admin, &ref_id, &proof, &1000u32);
+
+    // The default verification key has ic len 3, so exactly 2 inputs fit.
+    assert!(!client.verify_with_reference(&ref_id, &proof, &public_inputs_of_len(&env, 1)));
+    assert!(client.verify_with_reference(&ref_id, &proof, &public_inputs_of_len(&env, 2)));
+    assert!(!client.verify_with_reference(&ref_id, &proof, &public_inputs_of_len(&env, 3)));
+}
