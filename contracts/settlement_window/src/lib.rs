@@ -956,4 +956,106 @@ mod tests {
             .try_check_schedule_available(&company_id, &(base + 50), &(base + 50))
             .is_ok());
     }
+
+    #[test]
+    fn test_cancel_succeeds_on_final_grace_ledger() {
+        let (env, contract_id, _admin) = setup();
+        let client = SettlementWindowContractClient::new(&env, &contract_id);
+        let base = env.ledger().timestamp();
+        let company_id = 50u64;
+
+        // open = base, execute = base + 10, grace_until = base + 50.
+        client.create_period(
+            &company_id,
+            &base,
+            &(base + 10),
+            &(base + 50),
+            &(base + 100),
+        );
+
+        // The final ledger of the grace window is still inside it: execution
+        // is allowed and expiry has not started yet.
+        env.ledger().with_mut(|l| l.timestamp = base + 50);
+        assert!(client.try_check_execution_allowed(&company_id, &1).is_ok());
+        let too_early = client.try_expire_period(&company_id, &1);
+        assert_eq!(
+            too_early.unwrap_err().unwrap(),
+            SettlementError::ExecutionWindowNotOpen
+        );
+
+        // Cancelling on that same ledger succeeds and records the boundary time.
+        let cancelled = client.cancel_period(&company_id, &1);
+        assert_eq!(cancelled.phase, PeriodPhase::Cancelled);
+        assert_eq!(cancelled.transitioned_at, base + 50);
+
+        // Once cancelled, the period is finalized for both execution and expiry.
+        let execution = client.try_check_execution_allowed(&company_id, &1);
+        assert_eq!(
+            execution.unwrap_err().unwrap(),
+            SettlementError::AlreadyFinalized
+        );
+        let expiry = client.try_expire_period(&company_id, &1);
+        assert_eq!(
+            expiry.unwrap_err().unwrap(),
+            SettlementError::AlreadyFinalized
+        );
+    }
+
+    #[test]
+    fn test_cancel_rejected_once_expired_one_ledger_past_grace() {
+        let (env, contract_id, _admin) = setup();
+        let client = SettlementWindowContractClient::new(&env, &contract_id);
+        let base = env.ledger().timestamp();
+        let company_id = 51u64;
+
+        client.create_period(
+            &company_id,
+            &base,
+            &(base + 10),
+            &(base + 50),
+            &(base + 100),
+        );
+
+        // One second past grace_until the period expires, and expiry is final.
+        env.ledger().with_mut(|l| l.timestamp = base + 51);
+        let expired = client.expire_period(&company_id, &1);
+        assert_eq!(expired.phase, PeriodPhase::Expired);
+
+        let result = client.try_cancel_period(&company_id, &1);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            SettlementError::AlreadyFinalized
+        );
+    }
+
+    #[test]
+    fn test_boundary_cancellation_frees_schedule_for_new_period() {
+        let (env, contract_id, _admin) = setup();
+        let client = SettlementWindowContractClient::new(&env, &contract_id);
+        let base = env.ledger().timestamp();
+        let company_id = 52u64;
+
+        client.create_period(
+            &company_id,
+            &base,
+            &(base + 10),
+            &(base + 50),
+            &(base + 100),
+        );
+
+        env.ledger().with_mut(|l| l.timestamp = base + 50);
+        client.cancel_period(&company_id, &1);
+
+        // The cancelled window no longer collides, so the same schedule can be
+        // reissued as period 2 on the boundary ledger.
+        let next = client.create_period(
+            &company_id,
+            &base,
+            &(base + 10),
+            &(base + 50),
+            &(base + 100),
+        );
+        assert_eq!(next.period_id, 2);
+        assert_eq!(next.phase, PeriodPhase::Pending);
+    }
 }
