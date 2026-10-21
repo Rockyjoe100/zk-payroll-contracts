@@ -283,3 +283,83 @@ fn test_rejected_batch_leaves_receipt_unused() {
     assert_eq!(result, Err(Ok(PaymentError::SettlementReceiptAlreadyUsed)));
     assert!(executor.is_settlement_receipt_used(&receipt));
 }
+
+#[test]
+fn test_failed_batch_leaves_receipt_available_for_retry() {
+    let env = Env::default();
+    let (executor, _reg, _com, _tok, company_id, _treasury, employee) = setup_system(&env, 1_000);
+    let receipt = BytesN::from_array(&env, &[14u8; 32]);
+
+    // The treasury holds 1_000, so a 5_000 payout cannot settle.
+    let (e, a, pa, pb, pc, n) = one_employee_batch(&env, &employee, 5_000, 1);
+    let failed = executor.try_execute_batch_payroll_with_receipt(
+        &company_id,
+        &e,
+        &a,
+        &pa,
+        &pb,
+        &pc,
+        &n,
+        &1,
+        &receipt,
+    );
+    assert!(failed.is_err());
+    assert!(!executor.is_settlement_receipt_used(&receipt));
+
+    // A corrected retry with the same receipt ID still succeeds.
+    let (e, a, pa, pb, pc, n) = one_employee_batch(&env, &employee, 500, 1);
+    let records = executor.execute_batch_payroll_with_receipt(
+        &company_id,
+        &e,
+        &a,
+        &pa,
+        &pb,
+        &pc,
+        &n,
+        &1,
+        &receipt,
+    );
+
+    assert_eq!(records.len(), 1);
+    assert!(executor.is_settlement_receipt_used(&receipt));
+}
+
+#[test]
+fn test_receipt_is_rejected_in_a_later_period() {
+    let env = Env::default();
+    let (executor, _reg, _com, _tok, company_id, _treasury, employee) = setup_system(&env, 2_000);
+    let receipt = BytesN::from_array(&env, &[15u8; 32]);
+
+    let (e1, a1, pa1, pb1, pc1, n1) = one_employee_batch(&env, &employee, 500, 1);
+    executor.execute_batch_payroll_with_receipt(
+        &company_id,
+        &e1,
+        &a1,
+        &pa1,
+        &pb1,
+        &pc1,
+        &n1,
+        &1,
+        &receipt,
+    );
+
+    // Close period 1 and open period 2 for the same company.
+    executor.close_period(&company_id, &1);
+    executor.create_period(&company_id);
+
+    // The receipt guard spans payroll runs, not just a single period.
+    let (e2, a2, pa2, pb2, pc2, n2) = one_employee_batch(&env, &employee, 500, 2);
+    let result = executor.try_execute_batch_payroll_with_receipt(
+        &company_id,
+        &e2,
+        &a2,
+        &pa2,
+        &pb2,
+        &pc2,
+        &n2,
+        &2,
+        &receipt,
+    );
+
+    assert_eq!(result, Err(Ok(PaymentError::SettlementReceiptAlreadyUsed)));
+}
